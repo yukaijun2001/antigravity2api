@@ -28,6 +28,9 @@ public/images
 # 编译输出
 dist/
 
+# 部署进程
+.deploy.pid
+
 # 参考文件
 gcli2api/
 plans/geminicli-implementation-plan.md
