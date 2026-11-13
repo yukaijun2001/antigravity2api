@@ -11,8 +11,10 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const envFile = path.join(rootDir, '.env');
 const configFile = path.join(rootDir, 'config.json');
+const securityFile = path.join(rootDir, 'security.json');
 const envExample = path.join(rootDir, '.env.example');
 const configExample = path.join(rootDir, 'config.json.example');
+const securityExample = path.join(rootDir, 'security.json.example');
 
 console.log('🐳 开始构建 Docker 镜像...\n');
 
@@ -38,6 +40,18 @@ if (!fs.existsSync(configFile)) {
   }
 } else {
   console.log('✓ config.json 已存在');
+}
+
+// 检查并复制 security.json
+if (!fs.existsSync(securityFile)) {
+  if (fs.existsSync(securityExample)) {
+    fs.copyFileSync(securityExample, securityFile);
+    console.log('✓ 已从 security.json.example 创建 security.json');
+  } else {
+    console.warn('⚠ 未找到 security.json.example，将使用默认配置');
+  }
+} else {
+  console.log('✓ security.json 已存在');
 }
 
 // 确保必要的目录存在（防止 Docker 挂载时创建文件夹）

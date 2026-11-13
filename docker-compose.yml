@@ -1,21 +1,26 @@
-version: '3.8'
-
 services:
   antigravity2api:
     build: .
+    container_name: antigravity2api
     ports:
-      - "8045:8045"
+      - "10004:10004"
     environment:
-      - API_KEY=${API_KEY:-sk-text}
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key-change-this-in-production}
-      - PROXY=${PROXY:-}
-      - SYSTEM_INSTRUCTION=${SYSTEM_INSTRUCTION:-}
-      - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
+      PORT: 10004
+      HOST: 0.0.0.0
     volumes:
       - ./data:/app/data
       - ./public/images:/app/public/images
       - ./.env:/app/.env
       - ./config.json:/app/config.json
+      - ./security.json:/app/security.json
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:10004/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

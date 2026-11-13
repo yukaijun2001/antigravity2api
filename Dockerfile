@@ -2,6 +2,8 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+ENV PORT=10004 HOST=0.0.0.0
+
 # 复制 package.json 和 package-lock.json
 COPY package*.json ./
 
@@ -18,7 +20,7 @@ RUN cp .env.example .env
 RUN mkdir -p data public/images
 
 # 暴露端口
-EXPOSE 8045
+EXPOSE 10004
 
 # 启动应用
-CMD ["sh", "-c", "node src/config/init-env.js && npm start"]
+CMD ["sh", "-c", "node scripts/init-docker-env.js && node src/config/init-env.js && npm start"]

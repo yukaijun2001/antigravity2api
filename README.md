@@ -105,14 +105,22 @@ chmod +x update.sh
 
 ### 一键更新并部署
 
-在仓库目录执行，会拉取当前分支最新源码、安装依赖，并在 `10004` 端口后台启动：
+在 Linux 服务器安装并启动 Docker Engine 和 Docker Compose v2，然后在仓库目录执行。脚本会拉取当前分支最新源码、构建 Docker 镜像并启动容器，服务监听 `10004` 端口：
 
 ```bash
+git clone https://github.com/yukaijun2001/antigravity2api.git
+cd antigravity2api
 chmod +x deploy.sh
 ./deploy.sh
 ```
 
-管理界面：`http://127.0.0.1:10004`
+首次部署会从示例文件创建 `.env`、`config.json` 和 `security.json`，并为管理员账号、密码、API 密钥和 JWT 生成随机凭据。凭据保存在 `.env` 中，可用 `cat .env` 查看。部署过程通过 Compose 构建镜像并等待容器健康检查通过；后续更新会保留配置和数据。宿主机不需要安装 Node.js 或 npm。
+
+后续更新只需执行 `./deploy.sh`。从旧版 Node 部署迁移时，脚本会在镜像构建成功后，根据 `.deploy.pid` 停止本项目旧进程，再启动容器。
+
+管理界面：`http://服务器地址:10004`
+
+查看容器日志：`docker compose logs -f`
 
 ### 方式二：手动部署
 
@@ -131,6 +139,7 @@ npm install
 ```bash
 cp .env.example .env
 cp config.json.example config.json
+cp security.json.example security.json
 ```
 
 编辑 `.env` 文件配置必要参数：
@@ -277,19 +286,19 @@ sudo systemctl start antigravity2api
 
 ### 使用 Docker Compose（推荐）
 
-1. **一键构建**
+1. **一键部署或更新**
 
 ```bash
-npm run docker:build
+./deploy.sh
 ```
 
 该命令会自动：
-- 从 `.env.example` 创建 `.env`（如果不存在）
-- 从 `config.json.example` 创建 `config.json`（如果不存在）
+- 拉取当前分支最新源码
+- 从示例文件创建 `.env`、`config.json` 和 `security.json`（如果不存在）
 - 创建必要的目录（`data/`、`public/images/`）
-- 执行 `docker-compose build` 构建镜像
+- 构建镜像，在容器内初始化缺失的凭据，再启动容器并等待健康检查
 
-2. **启动服务**
+2. **启动已构建的服务**
 
 ```bash
 docker compose up -d
@@ -315,6 +324,7 @@ docker compose down
 # 复制配置文件
 cp .env.example .env
 cp config.json.example config.json
+cp security.json.example security.json
 
 # 创建必要目录
 mkdir -p data public/images
@@ -328,7 +338,9 @@ docker build -t antigravity2api .
 ```bash
 docker run -d \
   --name antigravity2api \
-  -p 8045:8045 \
+  -p 10004:10004 \
+  -e PORT=10004 \
+  -e HOST=0.0.0.0 \
   -e API_KEY=sk-text \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=admin123 \
@@ -338,6 +350,7 @@ docker run -d \
   -v $(pwd)/public/images:/app/public/images \
   -v $(pwd)/.env:/app/.env \
   -v $(pwd)/config.json:/app/config.json \
+  -v $(pwd)/security.json:/app/security.json \
   antigravity2api
 ```
 
@@ -351,8 +364,8 @@ docker logs -f antigravity2api
 
 - 数据持久化：`data/` 目录挂载到容器，保存 Token 数据
 - 图片存储：`public/images/` 目录挂载到容器，保存生成的图片
-- 配置文件：`.env` 和 `config.json` 挂载到容器，支持热更新
-- 端口映射：默认映射 8045 端口，可根据需要修改
+- 配置文件：`.env`、`config.json` 和 `security.json` 挂载到容器，支持保留和修改配置
+- 端口映射：默认映射 `10004` 端口
 - 自动重启：容器异常退出会自动重启
 
 ## Zeabur 部署

@@ -4,6 +4,10 @@ npm-debug.log
 .gitignore
 README.md
 .env
+config.json
+security.json
+logs/
+.deploy.pid
 .nyc_output
 coverage
 .DS_Store
