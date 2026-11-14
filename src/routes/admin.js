@@ -149,6 +149,27 @@ router.get('/tokens', cookieAuthMiddleware, async (req, res) => {
   }
 });
 
+router.get('/tokens/:tokenId/credentials', cookieAuthMiddleware, async (req, res) => {
+  try {
+    const token = await tokenManager.findTokenById(req.params.tokenId);
+    if (!token) {
+      return res.status(404).json({ success: false, message: 'Token不存在' });
+    }
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: {
+        access_token: token.access_token || '',
+        refresh_token: token.refresh_token || ''
+      }
+    });
+  } catch (error) {
+    logger.error('读取Token凭证失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 router.post('/tokens', cookieAuthMiddleware, async (req, res) => {
   const { access_token, refresh_token, expires_in, timestamp, enable, projectId, email, sub, credits } = req.body;
   if (!access_token || !refresh_token) {

@@ -976,6 +976,7 @@ function renderTokens(tokens) {
                     <button class="btn-icon token-refresh-btn ${isRefreshing ? 'loading' : ''}" id="refresh-btn-${escapeHtml(cardId)}" onclick="manualRefreshToken('${safeTokenId}')" title="刷新Token" ${isRefreshing ? 'disabled' : ''}>🔄</button>
                 </div>
                 <div class="token-header-right">
+                    <button class="btn-icon" onclick="showTokenCredentials('${safeTokenId}')" title="查看账号凭证" aria-label="查看账号凭证">🔐</button>
                     <button class="btn-icon" onclick="showTokenDetail('${safeTokenId}')" title="编辑">✏️</button>
                     <span class="token-id">#${tokenNumber}</span>
                 </div>
@@ -1022,6 +1023,127 @@ function renderTokens(tokens) {
 
     // 重置动画跳过标志
     skipAnimation = false;
+}
+
+async function showTokenCredentials(tokenId) {
+    const token = cachedTokens.find(item => item.id === tokenId);
+    if (!token) {
+        showToast('Token不存在', 'error');
+        return;
+    }
+
+    const credentialFields = {
+        accessTokenValue: 'access_token',
+        refreshTokenValue: 'refresh_token'
+    };
+    const credentials = { access_token: '', refresh_token: '' };
+    const modal = document.createElement('div');
+    modal.className = 'modal form-modal';
+    modal.innerHTML = `
+        <div class="modal-content token-credentials-modal" role="dialog" aria-modal="true" aria-labelledby="tokenCredentialsTitle">
+            <div class="modal-title" id="tokenCredentialsTitle">账号凭证</div>
+            <div class="token-credential-field">
+                <label for="accessTokenValue">Access token</label>
+                <textarea id="accessTokenValue" readonly spellcheck="false" autocomplete="off" placeholder="加载中..." data-revealed="false"></textarea>
+                <div class="token-credential-actions">
+                    <button type="button" class="btn btn-secondary btn-xs" data-credential-toggle="accessTokenValue" aria-pressed="false" disabled>显示</button>
+                    <button type="button" class="btn btn-info btn-xs" data-credential-copy="accessTokenValue" disabled>复制</button>
+                </div>
+            </div>
+            <div class="token-credential-field">
+                <label for="refreshTokenValue">Refresh token</label>
+                <textarea id="refreshTokenValue" readonly spellcheck="false" autocomplete="off" placeholder="加载中..." data-revealed="false"></textarea>
+                <div class="token-credential-actions">
+                    <button type="button" class="btn btn-secondary btn-xs" data-credential-toggle="refreshTokenValue" aria-pressed="false" disabled>显示</button>
+                    <button type="button" class="btn btn-info btn-xs" data-credential-copy="refreshTokenValue" disabled>复制</button>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" data-credential-close>关闭</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.tabIndex = -1;
+    modal.focus();
+
+    const close = () => {
+        credentials.access_token = '';
+        credentials.refresh_token = '';
+        modal.remove();
+    };
+    modal.addEventListener('click', event => {
+        if (event.target === modal || event.target.closest('[data-credential-close]')) close();
+    });
+    modal.addEventListener('click', async event => {
+        const toggle = event.target.closest('[data-credential-toggle]');
+        if (toggle) {
+            const input = document.getElementById(toggle.dataset.credentialToggle);
+            const revealed = input.dataset.revealed !== 'true';
+            const credential = credentials[credentialFields[input.id]];
+            input.dataset.revealed = String(revealed);
+            input.value = revealed ? credential : (credential ? '••••••••••••••••' : '');
+            toggle.textContent = revealed ? '隐藏' : '显示';
+            toggle.setAttribute('aria-pressed', String(revealed));
+            return;
+        }
+
+        const copy = event.target.closest('[data-credential-copy]');
+        if (copy) {
+            const fieldId = copy.dataset.credentialCopy;
+            await copyTokenCredential(credentials[credentialFields[fieldId]]);
+        }
+    });
+    modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') close();
+    });
+
+    try {
+        const response = await authFetch(`/admin/tokens/${encodeURIComponent(tokenId)}/credentials`);
+        const result = await response.json();
+        if (!result.success) throw new Error(result.message || '读取凭证失败');
+        if (!modal.isConnected) return;
+
+        Object.entries(credentialFields).forEach(([fieldId, credentialKey]) => {
+            const value = result.data[credentialKey] || '';
+            credentials[credentialKey] = value;
+            const input = document.getElementById(fieldId);
+            if (!input || !modal.isConnected) return;
+            input.value = value ? '••••••••••••••••' : '';
+            input.placeholder = value ? '' : '无凭证';
+            const copyButton = modal.querySelector(`[data-credential-copy="${fieldId}"]`);
+            const toggleButton = modal.querySelector(`[data-credential-toggle="${fieldId}"]`);
+            if (copyButton) copyButton.disabled = !value;
+            if (toggleButton) toggleButton.disabled = !value;
+        });
+    } catch (error) {
+        if (error.message !== 'Unauthorized') showToast(`读取账号凭证失败: ${error.message}`, 'error');
+        close();
+    }
+}
+
+async function copyTokenCredential(value) {
+    if (!value) return;
+
+    try {
+        await navigator.clipboard.writeText(value);
+        showToast('凭证已复制到剪贴板', 'success');
+    } catch (error) {
+        const fallback = document.createElement('textarea');
+        fallback.value = value;
+        fallback.setAttribute('readonly', '');
+        fallback.style.position = 'fixed';
+        fallback.style.opacity = '0';
+        document.body.appendChild(fallback);
+        fallback.select();
+        const copied = document.execCommand('copy');
+        fallback.remove();
+        if (copied) {
+            showToast('凭证已复制到剪贴板', 'success');
+            return;
+        }
+        showToast('无法直接访问剪贴板，请使用系统复制快捷键', 'warning');
+    }
 }
 
 // 手动刷新 Token（使用 tokenId）

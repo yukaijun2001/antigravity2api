@@ -483,6 +483,35 @@ button.loading::after {
     justify-content: center;
 }
 
+.token-credentials-modal {
+    max-height: min(80vh, 720px);
+    overflow-y: auto;
+}
+
+.token-credential-field {
+    margin-bottom: 1rem;
+}
+
+.token-credential-field label {
+    font-size: 0.8rem;
+}
+
+.token-credential-field textarea {
+    min-height: 96px;
+    max-height: 180px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+}
+
+.token-credential-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
 .status {
     padding: 0.25rem 0.5rem;
     border-radius: 9999px;
