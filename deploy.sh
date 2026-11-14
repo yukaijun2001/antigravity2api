@@ -9,6 +9,109 @@ cd "$ROOT"
 log() { printf '[部署] %s\n' "$*"; }
 die() { printf '[部署] 错误：%s\n' "$*" >&2; exit 1; }
 
+valid_ipv4() {
+  awk -F. '
+    NF != 4 { exit 1 }
+    {
+      for (part = 1; part <= 4; part++) {
+        if ($part !~ /^[0-9]+$/ || $part < 0 || $part > 255) exit 1
+      }
+    }
+  ' <<< "$1"
+}
+
+detect_server_ip() {
+  local candidate
+
+  for endpoint in https://api.ipify.org https://ipv4.icanhazip.com; do
+    if command -v curl >/dev/null 2>&1; then
+      candidate="$(curl -4fsS --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)"
+    elif command -v wget >/dev/null 2>&1; then
+      candidate="$(wget -4 -q -t 1 -T 4 -O - "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)"
+    else
+      break
+    fi
+    if valid_ipv4 "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  if command -v ip >/dev/null 2>&1; then
+    candidate="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
+    if valid_ipv4 "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    candidate="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if valid_ipv4 "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+set_detected_image_url() {
+  local image_url="$1"
+  local temporary_file
+
+  temporary_file="$(mktemp .env.XXXXXX)"
+  awk -v image_url="$image_url" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      lines[NR] = $0
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ /^# IMAGE_BASE_URL_AUTO_DETECTED=/) {
+        previous_auto_url = substr(line, length("# IMAGE_BASE_URL_AUTO_DETECTED=") + 1)
+        metadata_lines[NR] = 1
+        next
+      }
+      sub(/^export[[:space:]]+/, "", line)
+      equals = index(line, "=")
+      if (equals && trim(substr(line, 1, equals - 1)) == "IMAGE_BASE_URL") {
+        assignments[++assignment_count] = NR
+        assignment_lines[NR] = 1
+        current = trim(substr(line, equals + 1))
+        quote = substr(current, 1, 1)
+        if (quote == "\"" || quote == "\047") {
+          closing_quote = index(substr(current, 2), quote)
+          if (closing_quote) current = substr(current, 2, closing_quote - 1)
+        } else {
+          sub(/[[:space:]]+#.*/, "", current)
+        }
+        last_value = trim(current)
+      }
+    }
+    END {
+      auto_url = assignment_count == 0 || last_value == "" || (previous_auto_url != "" && last_value == previous_auto_url)
+      first_assignment = assignment_count ? assignments[1] : 0
+      for (line_number = 1; line_number <= NR; line_number++) {
+        if (metadata_lines[line_number]) {
+          continue
+        } else if (auto_url && assignment_lines[line_number]) {
+          if (line_number == first_assignment) print "IMAGE_BASE_URL=" image_url
+        } else {
+          print lines[line_number]
+        }
+      }
+      if (assignment_count == 0 && auto_url) print "IMAGE_BASE_URL=" image_url
+      if (auto_url) print "# IMAGE_BASE_URL_AUTO_DETECTED=" image_url
+    }
+  ' .env > "$temporary_file"
+  chmod 600 "$temporary_file"
+  mv "$temporary_file" .env
+}
+
 if [ "${DEPLOY_FROM_COPY:-0}" != "1" ]; then
   SCRIPT_COPY="$(mktemp "${TMPDIR:-/tmp}/antigravity2api-deploy.XXXXXX")"
   trap 'rm -f "$SCRIPT_COPY"' EXIT
@@ -67,6 +170,15 @@ if [ ! -f security.json ]; then
   log "已从 security.json.example 创建 security.json"
 fi
 
+SERVER_IP="$(detect_server_ip || true)"
+if [ -n "$SERVER_IP" ]; then
+  log "探测到服务器 IP: $SERVER_IP"
+  set_detected_image_url "http://$SERVER_IP:10004"
+else
+  SERVER_IP=127.0.0.1
+  log "无法自动探测服务器 IP，将使用本机地址显示部署 URL"
+fi
+
 mkdir -p data public/images
 
 log "构建 Docker 镜像..."
@@ -106,7 +218,7 @@ stop_legacy_node() {
 
 stop_legacy_node
 log "启动 Docker 容器..."
-docker compose up -d --remove-orphans
+docker compose up -d --force-recreate --remove-orphans
 
 ready=0
 for _ in $(seq 1 60); do
@@ -137,7 +249,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 log "部署完成"
-log "管理界面: http://127.0.0.1:10004"
-log "OpenAI 兼容接口: http://127.0.0.1:10004/v1"
+log "管理界面: http://$SERVER_IP:10004"
+log "OpenAI 兼容接口: http://$SERVER_IP:10004/v1"
 log "随机凭据已保存到 .env"
 log "查看日志: docker compose logs -f"

@@ -697,6 +697,21 @@ button.loading::after {
     font-size: 0.8rem;
 }
 
+.api-key-field {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.api-key-field input {
+    flex: 1;
+    min-width: 0;
+}
+
+.api-key-field .btn {
+    min-height: 36px;
+}
+
 .form-group.compact textarea {
     min-height: 60px;
     max-height: 300px;

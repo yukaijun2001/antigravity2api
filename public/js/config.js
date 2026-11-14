@@ -113,7 +113,24 @@ async function loadRotationStatus() {
     }
 }
 
+function setApiKeyVisibility(visible) {
+    const input = document.getElementById('apiKey');
+    const button = document.getElementById('toggleApiKeyVisibility');
+    if (!input || !button) return;
+
+    input.type = visible ? 'text' : 'password';
+    button.textContent = visible ? '隐藏' : '显示';
+    button.setAttribute('aria-label', visible ? '隐藏 API 密钥' : '显示 API 密钥');
+    button.setAttribute('aria-pressed', String(visible));
+}
+
+function toggleApiKeyField() {
+    const input = document.getElementById('apiKey');
+    if (input) setApiKeyVisibility(input.type === 'password');
+}
+
 async function loadConfig() {
+    setApiKeyVisibility(false);
     try {
         const response = await authFetch('/admin/config');
         const data = await response.json();
