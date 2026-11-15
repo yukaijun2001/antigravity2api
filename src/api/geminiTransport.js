@@ -7,8 +7,8 @@ import requesterManager from '../utils/requesterManager.js';
  * （TLS 路径返回 src/requester.js StreamResponse，
  *  axios 路径返回 requesterManager 内部的 AxiosStreamResponse）
  */
-export async function runSseStream({ url, method = 'POST', headers, body, processor, onErrorChunk } = {}) {
-  const streamResponse = await requesterManager.fetchStream(url, { method, headers, body });
+export async function runSseStream({ url, method = 'POST', headers, body, processor, onErrorChunk, signal } = {}) {
+  const streamResponse = await requesterManager.fetchStream(url, { method, headers, body, signal });
 
   let errorBody = '';
   let statusCode = null;

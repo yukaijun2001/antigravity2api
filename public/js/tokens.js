@@ -3,6 +3,7 @@
 let cachedTokens = [];
 let currentFilter = localStorage.getItem('tokenFilter') || 'all'; // 'all', 'enabled', 'disabled'
 let skipAnimation = false; // 是否跳过动画
+let activeTokenTestController = null;
 
 // 移动端操作区手动收起/展开
 let actionBarCollapsed = localStorage.getItem('actionBarCollapsed') === 'true';
@@ -976,6 +977,7 @@ function renderTokens(tokens) {
                     <button class="btn-icon token-refresh-btn ${isRefreshing ? 'loading' : ''}" id="refresh-btn-${escapeHtml(cardId)}" onclick="manualRefreshToken('${safeTokenId}')" title="刷新Token" ${isRefreshing ? 'disabled' : ''}>🔄</button>
                 </div>
                 <div class="token-header-right">
+                    <button class="btn-icon" onclick="showTokenTestModal('${safeTokenId}')" title="测试此账号" aria-label="测试此账号">🧪</button>
                     <button class="btn-icon" onclick="showTokenCredentials('${safeTokenId}')" title="查看账号凭证" aria-label="查看账号凭证">🔐</button>
                     <button class="btn-icon" onclick="showTokenDetail('${safeTokenId}')" title="编辑">✏️</button>
                     <span class="token-id">#${tokenNumber}</span>
@@ -1143,6 +1145,209 @@ async function copyTokenCredential(value) {
             return;
         }
         showToast('无法直接访问剪贴板，请使用系统复制快捷键', 'warning');
+    }
+}
+
+async function showTokenTestModal(tokenId) {
+    if (!cachedTokens.some(token => token.id === tokenId)) {
+        showToast('Token不存在', 'error');
+        return;
+    }
+
+    closeTokenTestModal();
+    const modal = document.createElement('div');
+    modal.className = 'modal form-modal token-test-modal';
+    modal.innerHTML = `
+        <section class="modal-content token-test-content" role="dialog" aria-modal="true" aria-labelledby="tokenTestTitle">
+            <header class="token-test-header">
+                <div>
+                    <div class="modal-title" id="tokenTestTitle">账号模型测试</div>
+                    <div class="token-test-account">账号 #${cachedTokens.findIndex(token => token.id === tokenId) + 1}</div>
+                </div>
+                <button type="button" class="btn-icon" data-test-close title="关闭" aria-label="关闭">✕</button>
+            </header>
+            <div class="token-test-controls">
+                <div class="form-group compact">
+                    <label for="tokenTestModel">模型</label>
+                    <select id="tokenTestModel" disabled><option value="">正在加载模型...</option></select>
+                </div>
+                <div class="form-group compact">
+                    <label for="tokenTestPrompt">提示词</label>
+                    <textarea id="tokenTestPrompt" rows="4" maxlength="20000" placeholder="输入要发送给此账号的提示词"></textarea>
+                </div>
+                <div class="token-test-actions">
+                    <span class="token-test-status" id="tokenTestStatus" role="status">正在加载账号模型</span>
+                    <div>
+                        <button type="button" class="btn btn-danger btn-sm" id="tokenTestStop" disabled>停止</button>
+                        <button type="button" class="btn btn-info btn-sm" id="tokenTestSend" disabled>发送</button>
+                    </div>
+                </div>
+            </div>
+            <div class="token-test-result-label">流式响应</div>
+            <pre class="token-test-output" id="tokenTestOutput" aria-live="polite">选择模型并输入提示词后发送。</pre>
+        </section>
+    `;
+    document.body.appendChild(modal);
+
+    activeTokenTestController = { tokenId, controller: null, modal };
+    const modelSelect = modal.querySelector('#tokenTestModel');
+    const promptInput = modal.querySelector('#tokenTestPrompt');
+    const status = modal.querySelector('#tokenTestStatus');
+    const output = modal.querySelector('#tokenTestOutput');
+    const sendButton = modal.querySelector('#tokenTestSend');
+    const stopButton = modal.querySelector('#tokenTestStop');
+
+    const close = () => closeTokenTestModal(modal);
+    modal.addEventListener('click', event => {
+        if (event.target === modal || event.target.closest('[data-test-close]')) close();
+    });
+    modal.addEventListener('keydown', event => {
+        if (event.key === 'Escape') close();
+    });
+    promptInput.addEventListener('input', () => {
+        sendButton.disabled = !modelSelect.value || !promptInput.value.trim() || stopButton.disabled === false;
+    });
+    modelSelect.addEventListener('change', () => {
+        sendButton.disabled = !modelSelect.value || !promptInput.value.trim() || stopButton.disabled === false;
+    });
+    stopButton.addEventListener('click', () => activeTokenTestController?.controller?.abort());
+    sendButton.addEventListener('click', () => runTokenTest(tokenId, modal));
+
+    try {
+        const response = await authFetch(`/admin/tokens/${encodeURIComponent(tokenId)}/test-models`);
+        const data = await response.json();
+        if (!data.success || !Array.isArray(data.data)) {
+            throw new Error(data.message || '读取模型列表失败');
+        }
+        if (!modal.isConnected) return;
+
+        const models = [...new Set(data.data.filter(model => typeof model === 'string' && model.trim()))];
+        modelSelect.replaceChildren();
+        if (models.length === 0) {
+            modelSelect.add(new Option('此账号没有可用模型', ''));
+            modelSelect.disabled = true;
+            status.textContent = '未获取到此账号可用模型';
+            return;
+        }
+
+        for (const model of models) modelSelect.add(new Option(model, model));
+        modelSelect.disabled = false;
+        sendButton.disabled = !promptInput.value.trim();
+        status.textContent = `${models.length} 个可用模型`;
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            status.textContent = error.message;
+            status.classList.add('error');
+        }
+        modelSelect.replaceChildren(new Option('模型加载失败', ''));
+        modelSelect.disabled = true;
+    }
+}
+
+function closeTokenTestModal(modal = activeTokenTestController?.modal) {
+    if (!modal) return;
+    if (activeTokenTestController?.modal === modal) {
+        activeTokenTestController.controller?.abort();
+        activeTokenTestController = null;
+    }
+    modal.remove();
+}
+
+async function runTokenTest(tokenId, modal) {
+    if (!modal.isConnected || activeTokenTestController?.modal !== modal) return;
+    const model = modal.querySelector('#tokenTestModel').value;
+    const prompt = modal.querySelector('#tokenTestPrompt').value.trim();
+    if (!model) {
+        showToast('请选择模型', 'warning');
+        return;
+    }
+    if (!prompt) {
+        showToast('请输入提示词', 'warning');
+        return;
+    }
+
+    const status = modal.querySelector('#tokenTestStatus');
+    const output = modal.querySelector('#tokenTestOutput');
+    const sendButton = modal.querySelector('#tokenTestSend');
+    const stopButton = modal.querySelector('#tokenTestStop');
+    output.textContent = '';
+    status.textContent = `正在使用 ${model} 测试...`;
+    status.classList.remove('error');
+    sendButton.disabled = true;
+    stopButton.disabled = false;
+    const controller = new AbortController();
+    activeTokenTestController.controller = controller;
+
+    try {
+        const response = await authFetch(`/admin/tokens/${encodeURIComponent(tokenId)}/test`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, prompt }),
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.message || `请求失败 (HTTP ${response.status})`);
+        }
+        if (!response.body) throw new Error('浏览器不支持流式响应读取');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sawError = false;
+        const appendEvent = rawEvent => {
+            const lines = rawEvent.split(/\r?\n/);
+            for (const line of lines) {
+                if (!line.startsWith('data:')) continue;
+                const rawData = line.slice(5).trim();
+                if (!rawData || rawData === '[DONE]') continue;
+                let event;
+                try { event = JSON.parse(rawData); } catch { continue; }
+                if (event.type === 'text' || event.type === 'content') {
+                    output.textContent += event.content || '';
+                } else if (event.type === 'reasoning') {
+                    output.textContent += event.reasoning_content || '';
+                } else if (event.type === 'tool_calls') {
+                    const calls = (event.tool_calls || []).map(call => {
+                        const name = call.function?.name || 'tool';
+                        const args = call.function?.arguments || '';
+                        return `[工具调用] ${name}\n${args}`;
+                    }).join('\n');
+                    if (calls) output.textContent += `\n${calls}\n`;
+                } else if (event.type === 'error') {
+                    sawError = true;
+                    status.textContent = event.message || '上游请求失败';
+                    status.classList.add('error');
+                }
+                output.scrollTop = output.scrollHeight;
+            }
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split(/\r?\n\r?\n/);
+            buffer = events.pop() || '';
+            events.forEach(appendEvent);
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) appendEvent(buffer);
+        if (!sawError) status.textContent = '响应完成';
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            status.textContent = '已停止';
+        } else if (error.message !== 'Unauthorized') {
+            status.textContent = error.message;
+            status.classList.add('error');
+            if (!output.textContent) output.textContent = error.message;
+        }
+    } finally {
+        if (modal.isConnected && activeTokenTestController?.controller === controller) {
+            stopButton.disabled = true;
+            sendButton.disabled = !modal.querySelector('#tokenTestModel').value || !modal.querySelector('#tokenTestPrompt').value.trim();
+        }
     }
 }
 

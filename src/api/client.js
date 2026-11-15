@@ -243,7 +243,7 @@ async function withUpstreamFallback(fn) {
 }
 
 // 统一错误处理
-async function handleApiError(error, token, dumpId = null) {
+async function handleApiError(error, token, dumpId = null, { disableToken = true } = {}) {
   const status = getUpstreamStatus(error);
   const errorBody = await readUpstreamErrorBody(error);
 
@@ -255,8 +255,11 @@ async function handleApiError(error, token, dumpId = null) {
     if (isCallerDoesNotHavePermission(errorBody)) {
       throw createApiError(`超出模型最大上下文。错误详情: ${errorBody}`, status, errorBody);
     }
-    tokenManager.disableToken(token);
-    throw createApiError(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`, status, errorBody);
+    if (disableToken) {
+      tokenManager.disableToken(token);
+      throw createApiError(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`, status, errorBody);
+    }
+    throw createApiError(`该账号没有使用权限。错误详情: ${errorBody}`, status, errorBody);
   }
 
   throw createApiError(`API请求失败 (${status}): ${errorBody}`, status, errorBody);
@@ -265,13 +268,13 @@ async function handleApiError(error, token, dumpId = null) {
 
 // ==================== 导出函数 ====================
 
-export async function generateAssistantResponse(requestBody, token, callback) {
-  startTokenTimer(token);
+export async function generateAssistantResponse(requestBody, token, callback, { sideEffects = true, signal } = {}) {
+  if (sideEffects) startTokenTimer(token);
   const trajectoryId = requestBody.requestId.split('/')[2];
   const conversationId = randomUUID();
   const messageId = randomUUID();
   const modelName = requestBody.model;
-  const dumpId = isDebugDumpEnabled() ? createDumpId('stream') : null;
+  const dumpId = sideEffects && isDebugDumpEnabled() ? createDumpId('stream') : null;
   const streamCollector = dumpId ? createStreamCollector() : null;
   let num = Math.floor(Math.random() * QA_PAIRS.length);
   if (dumpId) {
@@ -287,7 +290,12 @@ export async function generateAssistantResponse(requestBody, token, callback) {
       return callback(...args);
     };
 
+    if (signal?.aborted) return;
+
     await withUpstreamFallback(async (candidate) => {
+      if (signal?.aborted) {
+        throw Object.assign(new Error('Request aborted'), { name: 'AbortError', code: 'ERR_CANCELED' });
+      }
       const targetUrl = candidate?.url || config.api.url;
       const targetHost = candidate?.host || config.api.host;
       const headers = buildHeaders(token, targetHost);
@@ -312,7 +320,8 @@ export async function generateAssistantResponse(requestBody, token, callback) {
           headers,
           body: requestBody,
           processor,
-          onErrorChunk: (chunk) => collectStreamChunk(streamCollector, chunk)
+          onErrorChunk: (chunk) => collectStreamChunk(streamCollector, chunk),
+          signal
         });
       } catch (error) {
         try { processor.close(); } catch { }
@@ -328,12 +337,15 @@ export async function generateAssistantResponse(requestBody, token, callback) {
     if (dumpId) {
       await dumpStreamResponse(dumpId, streamCollector);
     }
-    sendRecordCodeAssistMetrics(token, trajectoryId).catch(err => logger.warn('发送RecordCodeAssistMetrics失败:', err.message));
-    sendRecordTrajectoryAnalytics(token, num, trajectoryId, messageId, conversationId, modelName).catch(err => logger.warn('发送轨迹分析失败:', err.message));
-    sendLog(token, num, trajectoryId, conversationId, messageId).catch(err => logger.warn('发送log失败:', err.message));
-    sendCheckPoint(token).catch(err => logger.warn('发送checkPoint失败:', err.message));;
+    if (sideEffects) {
+      sendRecordCodeAssistMetrics(token, trajectoryId).catch(err => logger.warn('发送RecordCodeAssistMetrics失败:', err.message));
+      sendRecordTrajectoryAnalytics(token, num, trajectoryId, messageId, conversationId, modelName).catch(err => logger.warn('发送轨迹分析失败:', err.message));
+      sendLog(token, num, trajectoryId, conversationId, messageId).catch(err => logger.warn('发送log失败:', err.message));
+      sendCheckPoint(token).catch(err => logger.warn('发送checkPoint失败:', err.message));
+    }
   } catch (error) {
-    await handleApiError(error, token, dumpId);
+    if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') return;
+    await handleApiError(error, token, dumpId, { disableToken: sideEffects });
   }
 }
 
@@ -406,6 +418,26 @@ export async function getAvailableModels() {
   logger.info(`模型列表已缓存 (有效期: ${currentTTL / 1000}秒, 模型数量: ${modelList.length})`);
 
   return result;
+}
+
+export async function getAvailableModelsForToken(token) {
+  if (!token?.access_token) throw new Error('账号缺少 access_token');
+
+  try {
+    const { data } = await requesterManager.fetch(config.api.modelsUrl, {
+      method: 'POST',
+      headers: buildHeaders(token),
+      body: {},
+      okStatus: [200]
+    });
+    const models = Object.keys(data?.models || {}).sort((left, right) => left.localeCompare(right));
+    if (models.length === 0) throw new Error('该账号没有可用模型');
+    return models;
+  } catch (error) {
+    const status = error?.status ? ` (HTTP ${error.status})` : '';
+    const detail = typeof error?.message === 'string' ? error.message : '模型列表请求失败';
+    throw new Error(`读取该账号支持的模型失败${status}: ${detail}`);
+  }
 }
 
 // 清除模型列表缓存（可用于手动刷新）

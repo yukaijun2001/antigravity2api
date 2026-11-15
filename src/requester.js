@@ -165,6 +165,14 @@ class FingerprintRequester {
     }
 
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        const error = new Error('Request aborted');
+        error.code = 'ERR_CANCELED';
+        error.config = config;
+        reject(error);
+        return;
+      }
+
       const proc = spawn(this.binaryPath);
       this.activeProcesses.add(proc);
       let headersParsed = false;
@@ -185,16 +193,15 @@ class FingerprintRequester {
       }, timeoutSec * 1000);
 
       // Support request cancellation
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          proc.kill();
-          clearTimeout(timeoutId);
-          const error = new Error('Request aborted');
-          error.code = 'ERR_CANCELED';
-          error.config = config;
-          reject(error);
-        });
-      }
+      const onAbort = () => {
+        proc.kill();
+        clearTimeout(timeoutId);
+        const error = new Error('Request aborted');
+        error.code = 'ERR_CANCELED';
+        error.config = config;
+        reject(error);
+      };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
       proc.stdout.on('data', (chunk) => {
         if (!headersParsed) {
@@ -267,6 +274,7 @@ class FingerprintRequester {
 
       proc.on('close', async (code) => {
         clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', onAbort);
         this.activeProcesses.delete(proc);
 
         if (code !== 0) {
@@ -405,6 +413,7 @@ class FingerprintRequester {
       data: options.body || '',
       timeout: options.timeout_ms ? Math.ceil(options.timeout_ms / 1000) : this.defaults.timeout,
       proxy: options.proxy || this.defaults.proxy,
+      signal: options.signal,
       skipGzipDecompress: isStream,
     };
   }

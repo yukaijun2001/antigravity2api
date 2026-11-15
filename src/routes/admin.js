@@ -10,7 +10,8 @@ import memoryManager from '../utils/memoryManager.js';
 import { parseEnvFile, updateEnvFile } from '../utils/envParser.js';
 import { reloadConfig } from '../utils/configReloader.js';
 import { deepMerge } from '../utils/deepMerge.js';
-import { getModelsWithQuotas } from '../api/client.js';
+import { generateAssistantResponse, getAvailableModelsForToken, getModelsWithQuotas } from '../api/client.js';
+import { generateRequestBody } from '../utils/utils.js';
 import { getEnvPath } from '../utils/paths.js';
 import ipBlockManager from '../utils/ipBlockManager.js';
 import dotenv from 'dotenv';
@@ -167,6 +168,95 @@ router.get('/tokens/:tokenId/credentials', cookieAuthMiddleware, async (req, res
   } catch (error) {
     logger.error('读取Token凭证失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/tokens/:tokenId/test-models', cookieAuthMiddleware, async (req, res) => {
+  try {
+    let token = await tokenManager.findTokenById(req.params.tokenId);
+    if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
+
+    if (tokenManager.isExpired(token)) {
+      await tokenManager.refreshTokenById(req.params.tokenId);
+      token = await tokenManager.findTokenById(req.params.tokenId);
+    }
+
+    const models = await getAvailableModelsForToken(token);
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, data: models });
+  } catch (error) {
+    logger.error('获取账号测试模型失败:', error.message);
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/tokens/:tokenId/test', cookieAuthMiddleware, async (req, res) => {
+  const { model, prompt } = req.body || {};
+  if (typeof model !== 'string' || !model.trim() || model.length > 200) {
+    return res.status(400).json({ success: false, message: '请选择有效模型' });
+  }
+  if (typeof prompt !== 'string' || !prompt.trim()) {
+    return res.status(400).json({ success: false, message: '请输入测试提示词' });
+  }
+  if (prompt.length > 20000) {
+    return res.status(413).json({ success: false, message: '提示词不能超过 20000 个字符' });
+  }
+
+  let token;
+  try {
+    token = await tokenManager.findTokenById(req.params.tokenId);
+    if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
+
+    if (tokenManager.isExpired(token)) {
+      await tokenManager.refreshTokenById(req.params.tokenId);
+      token = await tokenManager.findTokenById(req.params.tokenId);
+    }
+
+    const availableModels = await getAvailableModelsForToken(token);
+    if (!availableModels.includes(model.trim())) {
+      return res.status(400).json({ success: false, message: '所选模型不属于该账号的可用模型' });
+    }
+
+    const requestBody = generateRequestBody(
+      [{ role: 'user', content: prompt.trim() }],
+      model.trim(),
+      {},
+      undefined,
+      token
+    );
+
+    res.set({
+      'Cache-Control': 'no-cache, no-transform',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    res.flushHeaders();
+
+    const abortController = new AbortController();
+    res.on('close', () => abortController.abort());
+    const send = data => {
+      if (!abortController.signal.aborted && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    send({ type: 'start', model: model.trim() });
+    await generateAssistantResponse(requestBody, token, data => send(data), {
+      sideEffects: false,
+      signal: abortController.signal
+    });
+    if (abortController.signal.aborted) return;
+    send({ type: 'done' });
+    if (!res.writableEnded) res.end();
+  } catch (error) {
+    logger.error(`账号测试失败 (${req.params.tokenId}):`, error.message || error);
+    if (res.headersSent) {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: error.message || '上游请求失败' })}\n\n`);
+        res.end();
+      }
+      return;
+    }
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || '测试请求失败' });
   }
 });
 

@@ -488,6 +488,107 @@ button.loading::after {
     overflow-y: auto;
 }
 
+.token-test-modal {
+    z-index: 10000;
+}
+
+.token-test-content {
+    display: flex;
+    flex-direction: column;
+    width: min(760px, 100%);
+    max-width: 760px !important;
+    max-height: min(88vh, 900px);
+    overflow: hidden;
+}
+
+.token-test-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.token-test-header .modal-title {
+    margin-bottom: 0.15rem;
+}
+
+.token-test-account {
+    color: var(--text-light);
+    font-size: 0.75rem;
+}
+
+.token-test-controls {
+    flex: 0 0 auto;
+}
+
+.token-test-controls textarea {
+    min-height: 88px;
+    max-height: 180px;
+    resize: vertical;
+}
+
+.token-test-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.token-test-actions > div {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.token-test-status {
+    min-width: 0;
+    color: var(--text-light);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+}
+
+.token-test-status.error {
+    color: var(--danger);
+}
+
+.token-test-result-label {
+    flex: 0 0 auto;
+    margin-top: 1rem;
+    margin-bottom: 0.4rem;
+    color: var(--text-light);
+    font-size: 0.75rem;
+    font-weight: 650;
+}
+
+.token-test-output {
+    flex: 1 1 240px;
+    min-height: 180px;
+    max-height: 44vh;
+    overflow: auto;
+    margin: 0;
+    padding: 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+@media (max-width: 560px) {
+    .token-test-content {
+        max-height: 92vh;
+        padding: 1rem;
+    }
+
+    .token-test-output {
+        max-height: 38vh;
+    }
+}
+
 .token-credential-field {
     margin-bottom: 1rem;
 }

@@ -62,6 +62,7 @@ export function buildAxiosRequestConfig({
   data = null,
   timeout = config.timeout,
   responseType,
+  signal,
   useChunked = false
 }) {
   const axiosConfig = {
@@ -69,6 +70,7 @@ export function buildAxiosRequestConfig({
     url,
     headers: { ...headers },
     timeout,
+    signal,
     httpAgent,
     httpsAgent,
     proxy: buildProxyConfig(),

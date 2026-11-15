@@ -146,13 +146,13 @@ class RequesterManager {
    * @returns {Promise<StreamResponse | AxiosStreamResponse>}
    *   两者均实现 onStart/onData/onEnd/onError 链式调用接口
    */
-  async fetchStream(url, { method = 'POST', headers = {}, body = null } = {}) {
+  async fetchStream(url, { method = 'POST', headers = {}, body = null, signal } = {}) {
     await this._ensureInit();
 
     if (this._useAxios) {
-      return this._axiosFetchStream(url, { method, headers, body });
+      return this._axiosFetchStream(url, { method, headers, body, signal });
     }
-    return this._tlsFetchStream(url, { method, headers, body });
+    return this._tlsFetchStream(url, { method, headers, body, signal });
   }
 
   // ==================== TLS 路径 ====================
@@ -178,17 +178,18 @@ class RequesterManager {
     return { status: response.status, data };
   }
 
-  _tlsFetchStream(url, { method, headers, body }) {
-    const reqConfig = this._buildTlsConfig(method, headers, body);
+  _tlsFetchStream(url, { method, headers, body, signal }) {
+    const reqConfig = this._buildTlsConfig(method, headers, body, signal);
     return this._tlsRequester.antigravity_fetchStream(url, reqConfig);
   }
 
-  _buildTlsConfig(method, headers, body) {
+  _buildTlsConfig(method, headers, body, signal) {
     const reqConfig = {
       method,
       headers,
       timeout_ms: config.timeout,
       proxy: config.proxy || null,
+      signal,
     };
     if (body !== null) {
       // Buffer / Uint8Array 直接传递（但 TLS 请求器目前不支持二进制 body，调用方应使用 axios）
@@ -231,7 +232,7 @@ class RequesterManager {
    * axios 流式 SSE 路径
    * 返回一个实现了 onStart/onData/onEnd/onError 接口的对象，与 TLS StreamResponse 兼容
    */
-  _axiosFetchStream(url, { method, headers, body }) {
+  _axiosFetchStream(url, { method, headers, body, signal }) {
     const streamResponse = new AxiosStreamResponse();
 
     const axiosConfig = buildAxiosRequestConfig({
@@ -240,6 +241,7 @@ class RequesterManager {
       headers,
       data: body,
       timeout: config.timeout,
+      signal,
     });
     axiosConfig.responseType = 'stream';
 
@@ -247,6 +249,12 @@ class RequesterManager {
       .then((response) => {
         const status = response.status;
         streamResponse._status = status;
+        if (signal?.aborted) {
+          response.data.destroy();
+          return;
+        }
+        const abortStream = () => response.data.destroy(new Error('Request aborted'));
+        signal?.addEventListener('abort', abortStream, { once: true });
         if (streamResponse._onStart) {
           streamResponse._onStart({ status, headers: response.headers });
         }
@@ -259,12 +267,14 @@ class RequesterManager {
         });
 
         response.data.on('end', () => {
+          signal?.removeEventListener('abort', abortStream);
           if (streamResponse._onEnd) {
             streamResponse._onEnd();
           }
         });
 
         response.data.on('error', (err) => {
+          signal?.removeEventListener('abort', abortStream);
           if (streamResponse._onError) {
             streamResponse._onError(err);
           }
