@@ -977,7 +977,7 @@ function renderTokens(tokens) {
                     <button class="btn-icon token-refresh-btn ${isRefreshing ? 'loading' : ''}" id="refresh-btn-${escapeHtml(cardId)}" onclick="manualRefreshToken('${safeTokenId}')" title="刷新Token" ${isRefreshing ? 'disabled' : ''}>🔄</button>
                 </div>
                 <div class="token-header-right">
-                    <button class="btn-icon" onclick="showTokenTestModal('${safeTokenId}')" title="测试此账号" aria-label="测试此账号">🧪</button>
+                    <button type="button" class="btn-icon" onclick="showTokenTestModal('${safeTokenId}', 'antigravity', this)" title="测试此账号" aria-label="测试此账号">🧪</button>
                     <button class="btn-icon" onclick="showTokenCredentials('${safeTokenId}')" title="查看账号凭证" aria-label="查看账号凭证">🔐</button>
                     <button class="btn-icon" onclick="showTokenDetail('${safeTokenId}')" title="编辑">✏️</button>
                     <span class="token-id">#${tokenNumber}</span>
@@ -1148,11 +1148,15 @@ async function copyTokenCredential(value) {
     }
 }
 
-async function showTokenTestModal(tokenId) {
-    if (!cachedTokens.some(token => token.id === tokenId)) {
+async function showTokenTestModal(tokenId, provider = 'antigravity', trigger) {
+    const isCli = provider === 'geminicli';
+    const accounts = isCli ? cachedGeminiCliTokens : cachedTokens;
+    const accountIndex = accounts.findIndex(token => token.id === tokenId);
+    if (accountIndex < 0) {
         showToast('Token不存在', 'error');
         return;
     }
+    const endpoint = `${isCli ? '/admin/geminicli/tokens' : '/admin/tokens'}/${encodeURIComponent(tokenId)}`;
 
     closeTokenTestModal();
     const modal = document.createElement('div');
@@ -1162,7 +1166,7 @@ async function showTokenTestModal(tokenId) {
             <header class="token-test-header">
                 <div>
                     <div class="modal-title" id="tokenTestTitle">账号模型测试</div>
-                    <div class="token-test-account">账号 #${cachedTokens.findIndex(token => token.id === tokenId) + 1}</div>
+                    <div class="token-test-account">${isCli ? 'Gemini CLI ' : ''}账号 #${accountIndex + 1}</div>
                 </div>
                 <button type="button" class="btn-icon" data-test-close title="关闭" aria-label="关闭">✕</button>
             </header>
@@ -1189,11 +1193,11 @@ async function showTokenTestModal(tokenId) {
     `;
     document.body.appendChild(modal);
 
-    activeTokenTestController = { tokenId, controller: null, modal };
+    const accountTest = { endpoint, controller: new AbortController(), modal, trigger };
+    activeTokenTestController = accountTest;
     const modelSelect = modal.querySelector('#tokenTestModel');
     const promptInput = modal.querySelector('#tokenTestPrompt');
     const status = modal.querySelector('#tokenTestStatus');
-    const output = modal.querySelector('#tokenTestOutput');
     const sendButton = modal.querySelector('#tokenTestSend');
     const stopButton = modal.querySelector('#tokenTestStop');
 
@@ -1210,11 +1214,12 @@ async function showTokenTestModal(tokenId) {
     modelSelect.addEventListener('change', () => {
         sendButton.disabled = !modelSelect.value || !promptInput.value.trim() || stopButton.disabled === false;
     });
-    stopButton.addEventListener('click', () => activeTokenTestController?.controller?.abort());
-    sendButton.addEventListener('click', () => runTokenTest(tokenId, modal));
+    stopButton.addEventListener('click', () => accountTest.controller?.abort());
+    sendButton.addEventListener('click', () => runTokenTest(accountTest));
+    modal.querySelector('[data-test-close]').focus();
 
     try {
-        const response = await authFetch(`/admin/tokens/${encodeURIComponent(tokenId)}/test-models`);
+        const response = await authFetch(`${endpoint}/test-models`, { signal: accountTest.controller.signal });
         const data = await response.json();
         if (!data.success || !Array.isArray(data.data)) {
             throw new Error(data.message || '读取模型列表失败');
@@ -1241,26 +1246,33 @@ async function showTokenTestModal(tokenId) {
         sendButton.disabled = !promptInput.value.trim();
         status.textContent = `${models.length} 个可用模型`;
     } catch (error) {
+        if (!modal.isConnected || error.name === 'AbortError') return;
         if (error.message !== 'Unauthorized') {
             status.textContent = error.message;
             status.classList.add('error');
         }
         modelSelect.replaceChildren(new Option('模型加载失败', ''));
         modelSelect.disabled = true;
+    } finally {
+        accountTest.controller = null;
     }
 }
 
 function closeTokenTestModal(modal = activeTokenTestController?.modal) {
     if (!modal) return;
+    let trigger;
     if (activeTokenTestController?.modal === modal) {
         activeTokenTestController.controller?.abort();
+        trigger = activeTokenTestController.trigger;
         activeTokenTestController = null;
     }
     modal.remove();
+    if (trigger?.isConnected) trigger.focus();
 }
 
-async function runTokenTest(tokenId, modal) {
-    if (!modal.isConnected || activeTokenTestController?.modal !== modal) return;
+async function runTokenTest(accountTest) {
+    const { endpoint, modal } = accountTest;
+    if (activeTokenTestController !== accountTest || !modal.isConnected || accountTest.controller) return;
     const model = modal.querySelector('#tokenTestModel').value;
     const prompt = modal.querySelector('#tokenTestPrompt').value.trim();
     if (!model) {
@@ -1282,10 +1294,10 @@ async function runTokenTest(tokenId, modal) {
     sendButton.disabled = true;
     stopButton.disabled = false;
     const controller = new AbortController();
-    activeTokenTestController.controller = controller;
+    accountTest.controller = controller;
 
     try {
-        const response = await authFetch(`/admin/tokens/${encodeURIComponent(tokenId)}/test`, {
+        const response = await authFetch(`${endpoint}/test`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, prompt }),
@@ -1301,7 +1313,7 @@ async function runTokenTest(tokenId, modal) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let sawError = false;
+        let completed = false;
         const appendEvent = rawEvent => {
             const lines = rawEvent.split(/\r?\n/);
             for (const line of lines) {
@@ -1322,9 +1334,9 @@ async function runTokenTest(tokenId, modal) {
                     }).join('\n');
                     if (calls) output.textContent += `\n${calls}\n`;
                 } else if (event.type === 'error') {
-                    sawError = true;
-                    status.textContent = event.message || '上游请求失败';
-                    status.classList.add('error');
+                    throw new Error(event.message || '上游请求失败');
+                } else if (event.type === 'done') {
+                    completed = true;
                 }
                 output.scrollTop = output.scrollHeight;
             }
@@ -1340,7 +1352,8 @@ async function runTokenTest(tokenId, modal) {
         }
         buffer += decoder.decode();
         if (buffer.trim()) appendEvent(buffer);
-        if (!sawError) status.textContent = '响应完成';
+        if (!completed) throw new Error('流式响应提前中断，请重试');
+        status.textContent = '响应完成';
     } catch (error) {
         if (error.name === 'AbortError') {
             status.textContent = '已停止';
@@ -1350,7 +1363,9 @@ async function runTokenTest(tokenId, modal) {
             if (!output.textContent) output.textContent = error.message;
         }
     } finally {
-        if (modal.isConnected && activeTokenTestController?.controller === controller) {
+        controller.abort();
+        if (modal.isConnected && activeTokenTestController === accountTest) {
+            accountTest.controller = null;
             stopButton.disabled = true;
             sendButton.disabled = !modal.querySelector('#tokenTestModel').value || !modal.querySelector('#tokenTestPrompt').value.trim();
         }

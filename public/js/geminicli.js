@@ -199,6 +199,7 @@ function renderGeminiCliTokens(tokens) {
                     <button class="btn-icon token-refresh-btn" onclick="refreshGeminiCliToken('${safeTokenId}')" title="刷新Token">🔄</button>
                 </div>
                 <div class="token-header-right">
+                    <button type="button" class="btn-icon" onclick="showTokenTestModal('${safeTokenId}', 'geminicli', this)" title="测试此 CLI 账号" aria-label="测试此 CLI 账号">🧪</button>
                     <span class="token-id">#${tokenNumber}</span>
                 </div>
             </div>

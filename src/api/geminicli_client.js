@@ -2,6 +2,7 @@ import geminicliTokenManager from '../auth/geminicli_token_manager.js';
 import config from '../config/config.js';
 import logger from '../utils/logger.js';
 import { createApiError } from '../utils/errors.js';
+import requesterManager from '../utils/requesterManager.js';
 import {
   convertToToolCall
 } from './stream_parser.js';
@@ -86,7 +87,7 @@ function buildRequestBody(requestBody, model, projectId) {
  * @param {Error} error - 错误对象
  * @param {Object} token - Token 对象
  */
-async function handleApiError(error, token) {
+async function handleApiError(error, token, { disableToken = true } = {}) {
   const status = getUpstreamStatus(error);
   const errorBody = await readUpstreamErrorBody(error);
   
@@ -94,8 +95,11 @@ async function handleApiError(error, token) {
     if (isCallerDoesNotHavePermission(errorBody)) {
       throw createApiError(`超出模型最大上下文。错误详情: ${errorBody}`, status, errorBody);
     }
-    geminicliTokenManager.disableCurrentToken(token);
-    throw createApiError(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`, status, errorBody);
+    if (disableToken) {
+      geminicliTokenManager.disableCurrentToken(token);
+      throw createApiError(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`, status, errorBody);
+    }
+    throw createApiError(`该账号没有使用此模型的权限。错误详情: ${errorBody}`, status, errorBody);
   }
   
   if (status === 429) {
@@ -107,6 +111,40 @@ async function handleApiError(error, token) {
 
 // ==================== 导出函数 ====================
 
+export async function getGeminiCliModelsForToken(token) {
+  const url = new URL(buildApiUrl());
+  if (!url.pathname.endsWith(':streamGenerateContent')) {
+    throw createApiError('无法从 Gemini CLI 上游地址定位模型查询接口', 500);
+  }
+  url.pathname = url.pathname.replace(/:streamGenerateContent$/, ':retrieveUserQuota');
+  url.search = '';
+  url.hash = '';
+
+  let data;
+  try {
+    ({ data } = await requesterManager.fetch(url.href, {
+      method: 'POST',
+      headers: buildHeaders(token),
+      body: { project: token.projectId }
+    }));
+  } catch (error) {
+    const status = getUpstreamStatus(error);
+    throw createApiError(`获取该 CLI 账号的模型列表失败（上游状态 ${status}）`, status);
+  }
+
+  const buckets = data?.buckets ?? [];
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(buckets)) {
+    throw createApiError('Gemini CLI 返回的模型额度格式无效', 502);
+  }
+
+  const ids = new Set();
+  for (const bucket of buckets) {
+    const id = typeof bucket?.modelId === 'string' ? bucket.modelId.trim() : '';
+    if (id) ids.add(id);
+  }
+  return [...ids].sort((left, right) => left.localeCompare(right)).map(id => ({ id }));
+}
+
 /**
  * 流式生成响应
  * @param {Object} requestBody - Gemini API 格式的请求体
@@ -114,7 +152,8 @@ async function handleApiError(error, token) {
  * @param {string} model - 模型名称
  * @param {Function} callback - 回调函数
  */
-export async function generateStreamResponse(requestBody, token, model, callback) {
+export async function generateStreamResponse(requestBody, token, model, callback, { signal, sideEffects = true } = {}) {
+  if (signal?.aborted) return;
   if (!token.projectId) {
     throw createApiError('Token 缺少 projectId，请在管理页面获取 ProjectId', 400);
   }
@@ -124,7 +163,7 @@ export async function generateStreamResponse(requestBody, token, model, callback
   const fullRequestBody = buildRequestBody(requestBody, model, token.projectId);
   
   // 调试日志
-  const dumpId = isDebugDumpEnabled() ? createDumpId('cli_stream') : null;
+  const dumpId = sideEffects && isDebugDumpEnabled() ? createDumpId('cli_stream') : null;
   const streamCollector = dumpId ? createStreamCollector() : null;
   if (dumpId) {
     await dumpFinalRequest(dumpId, fullRequestBody);
@@ -148,7 +187,8 @@ export async function generateStreamResponse(requestBody, token, model, callback
       url,
       headers,
       body: fullRequestBody,
-      processor
+      processor,
+      signal
     });
     
     // 流式响应结束后写入日志
@@ -157,7 +197,8 @@ export async function generateStreamResponse(requestBody, token, model, callback
     }
   } catch (error) {
     try { processor.close(); } catch { }
-    await handleApiError(error, token);
+    if (signal?.aborted) return;
+    await handleApiError(error, token, { disableToken: sideEffects });
   }
 }
 

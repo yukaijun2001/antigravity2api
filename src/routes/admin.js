@@ -11,6 +11,10 @@ import { parseEnvFile, updateEnvFile } from '../utils/envParser.js';
 import { reloadConfig } from '../utils/configReloader.js';
 import { deepMerge } from '../utils/deepMerge.js';
 import { generateAssistantResponse, getAvailableModelsForToken, getModelsWithQuotas } from '../api/client.js';
+import { generateStreamResponse, getGeminiCliModelsForToken } from '../api/geminicli_client.js';
+import { convertOpenAIToGeminiCli } from '../utils/converters/geminicli.js';
+import { AppError } from '../utils/errors.js';
+import { createHeartbeat, writeStreamData } from '../server/stream.js';
 import { generateRequestBody } from '../utils/utils.js';
 import { getEnvPath } from '../utils/paths.js';
 import ipBlockManager from '../utils/ipBlockManager.js';
@@ -171,95 +175,104 @@ router.get('/tokens/:tokenId/credentials', cookieAuthMiddleware, async (req, res
   }
 });
 
-router.get('/tokens/:tokenId/test-models', cookieAuthMiddleware, async (req, res) => {
-  try {
-    let token = await tokenManager.findTokenById(req.params.tokenId);
-    if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
+function sendAccountTestError(res, error) {
+  const status = error.statusCode || 500;
+  const message = status === 401 ? '该账号授权失效，请重新授权后测试' : error.message;
+  res.status(status === 401 ? 400 : status).json({ success: false, message: message || '测试请求失败' });
+}
 
-    if (tokenManager.isExpired(token)) {
-      await tokenManager.refreshTokenById(req.params.tokenId);
-      token = await tokenManager.findTokenById(req.params.tokenId);
+function registerAccountTestRoutes(path, { findAccount, listModels, streamReply }) {
+  router.get(`${path}/test-models`, cookieAuthMiddleware, async (req, res) => {
+    try {
+      const token = await findAccount(req.params.tokenId);
+      if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
+
+      const models = await listModels(token);
+      const displayNames = Object.fromEntries(
+        models.filter(model => model.displayName).map(({ id, displayName }) => [id, displayName])
+      );
+      res.set('Cache-Control', 'no-store');
+      res.json({ success: true, data: models.map(model => model.id), displayNames });
+    } catch (error) {
+      logger.error('获取账号测试模型失败:', error.message);
+      sendAccountTestError(res, error);
+    }
+  });
+
+  router.post(`${path}/test`, cookieAuthMiddleware, async (req, res) => {
+    const { model, prompt } = req.body || {};
+    if (typeof model !== 'string' || !model.trim() || model.length > 200) {
+      return res.status(400).json({ success: false, message: '请选择有效模型' });
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ success: false, message: '请输入测试提示词' });
+    }
+    if (prompt.length > 20000) {
+      return res.status(413).json({ success: false, message: '提示词不能超过 20000 个字符' });
     }
 
-    const models = await getAvailableModelsForToken(token);
-    const displayNames = Object.fromEntries(
-      models.filter(model => model.displayName).map(({ id, displayName }) => [id, displayName])
-    );
-    res.set('Cache-Control', 'no-store');
-    res.json({ success: true, data: models.map(model => model.id), displayNames });
-  } catch (error) {
-    logger.error('获取账号测试模型失败:', error.message);
-    res.status(error.statusCode || 500).json({ success: false, message: error.message });
-  }
-});
-
-router.post('/tokens/:tokenId/test', cookieAuthMiddleware, async (req, res) => {
-  const { model, prompt } = req.body || {};
-  if (typeof model !== 'string' || !model.trim() || model.length > 200) {
-    return res.status(400).json({ success: false, message: '请选择有效模型' });
-  }
-  if (typeof prompt !== 'string' || !prompt.trim()) {
-    return res.status(400).json({ success: false, message: '请输入测试提示词' });
-  }
-  if (prompt.length > 20000) {
-    return res.status(413).json({ success: false, message: '提示词不能超过 20000 个字符' });
-  }
-
-  let token;
-  try {
-    token = await tokenManager.findTokenById(req.params.tokenId);
-    if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
-
-    if (tokenManager.isExpired(token)) {
-      await tokenManager.refreshTokenById(req.params.tokenId);
-      token = await tokenManager.findTokenById(req.params.tokenId);
-    }
-
-    const availableModels = await getAvailableModelsForToken(token);
-    if (!availableModels.some(availableModel => availableModel.id === model.trim())) {
-      return res.status(400).json({ success: false, message: '所选模型不属于该账号的可用模型' });
-    }
-
-    const requestBody = generateRequestBody(
-      [{ role: 'user', content: prompt.trim() }],
-      model.trim(),
-      {},
-      undefined,
-      token
-    );
-
-    res.set({
-      'Cache-Control': 'no-cache, no-transform',
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no'
+    const controller = new AbortController();
+    const { signal } = controller;
+    res.once('close', () => {
+      if (!res.writableEnded) controller.abort();
     });
-    res.flushHeaders();
-
-    const abortController = new AbortController();
-    res.on('close', () => abortController.abort());
     const send = data => {
-      if (!abortController.signal.aborted && !res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (!signal.aborted && !res.writableEnded) writeStreamData(res, data);
     };
+    const modelId = model.trim();
+    let heartbeat;
+    try {
+      const token = await findAccount(req.params.tokenId);
+      if (signal.aborted) return;
+      if (!token) return res.status(404).json({ success: false, message: 'Token不存在' });
 
-    send({ type: 'start', model: model.trim() });
-    await generateAssistantResponse(requestBody, token, data => send(data), {
-      sideEffects: false,
-      signal: abortController.signal
-    });
-    if (abortController.signal.aborted) return;
-    send({ type: 'done' });
-    if (!res.writableEnded) res.end();
-  } catch (error) {
-    logger.error(`账号测试失败 (${req.params.tokenId}):`, error.message || error);
-    if (res.headersSent) {
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: error.message || '上游请求失败' })}\n\n`);
-        res.end();
+      const availableModels = await listModels(token);
+      if (signal.aborted) return;
+      if (!availableModels.some(availableModel => availableModel.id === modelId)) {
+        return res.status(400).json({ success: false, message: '所选模型不属于该账号的可用模型' });
       }
-      return;
+
+      res.set({
+        'Cache-Control': 'no-store, no-transform',
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      res.flushHeaders();
+      heartbeat = createHeartbeat(res);
+      send({ type: 'start', model: modelId });
+      await streamReply({ token, model: modelId, prompt: prompt.trim(), send, signal });
+      if (signal.aborted) return;
+      send({ type: 'done' });
+      res.end();
+    } catch (error) {
+      if (signal.aborted) return;
+      logger.error(`账号测试失败 (${req.params.tokenId}):`, error.message || error);
+      if (res.headersSent) {
+        send({ type: 'error', message: error.message || '上游请求失败' });
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      sendAccountTestError(res, error);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || '测试请求失败' });
+  });
+}
+
+registerAccountTestRoutes('/tokens/:tokenId', {
+  async findAccount(tokenId) {
+    const token = await tokenManager.findTokenById(tokenId);
+    if (token && tokenManager.isExpired(token)) {
+      await tokenManager.refreshTokenById(tokenId);
+      return tokenManager.findTokenById(tokenId);
+    }
+    return token;
+  },
+  listModels: getAvailableModelsForToken,
+  streamReply({ token, model, prompt, send, signal }) {
+    const requestBody = generateRequestBody([{ role: 'user', content: prompt }], model, {}, undefined, token);
+    return generateAssistantResponse(requestBody, token, send, { sideEffects: false, signal });
   }
 });
 
@@ -914,6 +927,29 @@ router.get('/geminicli/tokens', cookieAuthMiddleware, async (req, res) => {
   } catch (error) {
     logger.error('[GeminiCLI] 获取Token列表失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+registerAccountTestRoutes('/geminicli/tokens/:tokenId', {
+  async findAccount(tokenId) {
+    if (config.geminicli?.enabled === false) throw new AppError('Gemini CLI 功能未启用', 503);
+
+    const token = await geminicliTokenManager.findTokenById(tokenId);
+    if (!token) return null;
+    if (!token.projectId) throw new AppError('此账号缺少 Project ID，请先在账号卡片点击「获取」', 400);
+    if (!token.access_token || geminicliTokenManager.isExpired(token)) {
+      return geminicliTokenManager.refreshToken(token);
+    }
+    return token;
+  },
+  listModels: getGeminiCliModelsForToken,
+  streamReply({ token, model, prompt, send, signal }) {
+    const { geminiRequest } = convertOpenAIToGeminiCli({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      stream: true
+    });
+    return generateStreamResponse(geminiRequest, token, model, send, { sideEffects: false, signal });
   }
 });
 

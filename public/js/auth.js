@@ -36,6 +36,7 @@ function showMainContent() {
 
 function silentLogout() {
     isLoggedIn = false;
+    closeTokenTestModal();
     setApiKeyVisibility(false);
     // 清除旧版本的 localStorage token（如果存在）
     localStorage.removeItem('authToken');
