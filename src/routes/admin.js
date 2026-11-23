@@ -182,8 +182,11 @@ router.get('/tokens/:tokenId/test-models', cookieAuthMiddleware, async (req, res
     }
 
     const models = await getAvailableModelsForToken(token);
+    const displayNames = Object.fromEntries(
+      models.filter(model => model.displayName).map(({ id, displayName }) => [id, displayName])
+    );
     res.set('Cache-Control', 'no-store');
-    res.json({ success: true, data: models });
+    res.json({ success: true, data: models.map(model => model.id), displayNames });
   } catch (error) {
     logger.error('获取账号测试模型失败:', error.message);
     res.status(error.statusCode || 500).json({ success: false, message: error.message });
@@ -213,7 +216,7 @@ router.post('/tokens/:tokenId/test', cookieAuthMiddleware, async (req, res) => {
     }
 
     const availableModels = await getAvailableModelsForToken(token);
-    if (!availableModels.includes(model.trim())) {
+    if (!availableModels.some(availableModel => availableModel.id === model.trim())) {
       return res.status(400).json({ success: false, message: '所选模型不属于该账号的可用模型' });
     }
 

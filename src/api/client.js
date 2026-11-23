@@ -430,7 +430,12 @@ export async function getAvailableModelsForToken(token) {
       body: {},
       okStatus: [200]
     });
-    const models = Object.keys(data?.models || {}).sort((left, right) => left.localeCompare(right));
+    const models = Object.entries(data?.models || {})
+      .map(([id, metadata]) => ({
+        id,
+        displayName: typeof metadata?.displayName === 'string' ? metadata.displayName.trim() : ''
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
     if (models.length === 0) throw new Error('该账号没有可用模型');
     return models;
   } catch (error) {

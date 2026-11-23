@@ -1230,7 +1230,13 @@ async function showTokenTestModal(tokenId) {
             return;
         }
 
-        for (const model of models) modelSelect.add(new Option(model, model));
+        for (const model of models) {
+            const displayName = data.displayNames?.[model];
+            const label = typeof displayName === 'string' && displayName && displayName !== model
+                ? `${displayName} (${model})`
+                : model;
+            modelSelect.add(new Option(label, model));
+        }
         modelSelect.disabled = false;
         sendButton.disabled = !promptInput.value.trim();
         status.textContent = `${models.length} 个可用模型`;
